@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Face & Body Scanner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- TensorFlow.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0"></script>
+
+  <!-- Face API -->
+  <script defer src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
+
+  <!-- MediaPipe Pose -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <!-- Object Detection -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #0b0f1a;
+      color: #e6e6e6;
+      font-family: Arial, sans-serif;
+    }
+    header {
+      padding: 12px;
+      background: #11182a;
+      text-align: center;
+      font-weight: bold;
+      letter-spacing: 1px;
+    }
+    #container {
+      display: flex;
+      gap: 10px;
+      padding: 10px;
+    }
+    video, canvas {
+      border-radius: 8px;
+    }
+    #left {
+      position: relative;
+    }
+    #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+    #right {
+      flex: 1;
+      background: #11182a;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    .log {
+      margin-bottom: 6px;
+      padding: 6px;
+      background: #0b0f1a;
+      border-radius: 6px;
+    }
+    img {
+      width: 100%;
+      border-radius: 6px;
+      margin-top: 6px;
+    }
+  </style>
+</head>
+<body>
+
+<header>AI FACE + BODY + ACTION SCANNER (LOCALHOST)</header>
+
+<div id="container">
+  <div id="left">
+    <video id="video" width="640" height="480" autoplay muted></video>
+    <canvas id="overlay" width="640" height="480"></canvas>
+  </div>
+
+  <div id="right">
+    <div class="log" id="status">Loading models...</div>
+    <div class="log" id="action">Action: Detecting...</div>
+    <div class="log" id="objects">Objects: None</div>
+    <div class="log">Face Proof (auto capture)</div>
+    <div id="proof"></div>
+  </div>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const statusBox = document.getElementById('status');
+const actionBox = document.getElementById('action');
+const objectBox = document.getElementById('objects');
+const proofBox = document.getElementById('proof');
+
+let cocoModel;
+let lastCapture = 0;
+
+// ---------------- CAMERA ----------------
+navigator.mediaDevices.getUserMedia({ video: true })
+  .then(stream => video.srcObject = stream);
+
+// ---------------- FACE API LOAD ----------------
+Promise.all([
+  faceapi.nets.tinyFaceDetector.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js/models'),
+  faceapi.nets.faceLandmark68Net.loadFromUri('https://cdn.jsdelivr.net/npm/face-api.js/models'),
+]).then(() => statusBox.innerText = 'Models loaded. Running AI...');
+
+// ---------------- COCO SSD ----------------
+cocoSsd.load().then(model => cocoModel = model);
+
+// ---------------- MEDIAPIPE POSE ----------------
+const pose = new Pose({
+  locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+});
+pose.setOptions({
+  modelComplexity: 1,
+  smoothLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+pose.onResults(onPoseResults);
+
+const camera = new Camera(video, {
+  onFrame: async () => {
+    await pose.send({ image: video });
+  },
+  width: 640,
+  height: 480
+});
+camera.start();
+
+// ---------------- MAIN LOOP ----------------
+async function onPoseResults(results) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (results.poseLandmarks) {
+    drawConnectors(ctx, results.poseLandmarks, POSE_CONNECTIONS,
+      { color: '#00ffcc', lineWidth: 2 });
+    drawLandmarks(ctx, results.poseLandmarks,
+      { color: '#ff0066', lineWidth: 1 });
+
+    detectAction(results.poseLandmarks);
+  }
+
+  detectFace();
+  detectObjects();
+}
+
+// ---------------- ACTION LOGIC ----------------
+function detectAction(lm) {
+  const leftKnee = lm[25];
+  const rightKnee = lm[26];
+  const leftAnkle = lm[27];
+  const rightAnkle = lm[28];
+
+  if (leftAnkle.y < leftKnee.y && rightAnkle.y < rightKnee.y) {
+    actionBox.innerText = 'Action: Jumping';
+  } else if (Math.abs(leftKnee.y - rightKnee.y) > 0.1) {
+    actionBox.innerText = 'Action: Walking / Running';
+  } else {
+    actionBox.innerText = 'Action: Standing';
+  }
+}
+
+// ---------------- FACE AUTO CAPTURE ----------------
+async function detectFace() {
+  const detections = await faceapi.detectSingleFace(
+    video,
+    new faceapi.TinyFaceDetectorOptions()
+  ).withFaceLandmarks();
+
+  if (detections) {
+    const box = detections.detection.box;
+    ctx.strokeStyle = '#00ff00';
+    ctx.strokeRect(box.x, box.y, box.width, box.height);
+
+    const now = Date.now();
+    if (now - lastCapture > 5000) {
+      captureFace(box);
+      lastCapture = now;
+    }
+  }
+}
+
+function captureFace(box) {
+  const temp = document.createElement('canvas');
+  temp.width = box.width;
+  temp.height = box.height;
+  temp.getContext('2d').drawImage(
+    video,
+    box.x, box.y, box.width, box.height,
+    0, 0, box.width, box.height
+  );
+
+  const img = document.createElement('img');
+  img.src = temp.toDataURL('image/png');
+  proofBox.prepend(img);
+}
+
+// ---------------- OBJECT DETECTION ----------------
+async function detectObjects() {
+  if (!cocoModel) return;
+  const predictions = await cocoModel.detect(video);
+  const names = predictions.map(p => p.class).join(', ');
+  objectBox.innerText = 'Objects: ' + (names || 'None');
+}
+</script>
+
+</body>
+</html>
