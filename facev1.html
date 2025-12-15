@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SENTINEL | AI Security Operations Center</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+    
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --panel-bg: #1f2833;
+            --text-main: #c5c6c7;
+            --accent-cyan: #66fcf1;
+            --accent-green: #45a29e;
+            --alert-red: #ff3b3b;
+            --warning-orange: #ff9d00;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: grid;
+            grid-template-rows: 60px 1fr;
+            overflow: hidden;
+        }
+
+        /* --- HEADER --- */
+        header {
+            background: var(--panel-bg);
+            border-bottom: 2px solid var(--accent-cyan);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            box-shadow: 0 0 15px rgba(102, 252, 241, 0.2);
+        }
+        .logo { font-size: 24px; font-weight: bold; letter-spacing: 2px; color: var(--accent-cyan); }
+        .system-status { font-family: monospace; font-size: 14px; display: flex; gap: 20px; }
+        .status-item span { font-weight: bold; }
+        .recording-dot { height: 12px; width: 12px; background: #555; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .recording-dot.active { background: var(--alert-red); animation: pulse 1s infinite; }
+
+        /* --- MAIN LAYOUT --- */
+        main {
+            display: grid;
+            grid-template-columns: 3fr 1fr; /* Video takes 75%, Sidebar 25% */
+            gap: 10px;
+            padding: 10px;
+            height: 100%;
+        }
+
+        /* VIDEO FEED PANEL */
+        .video-panel {
+            position: relative;
+            background: black;
+            border: 1px solid #333;
+            border-radius: 4px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        video { display: none; } /* Hide raw video */
+        canvas { max-width: 100%; max-height: 100%; display: block; }
+        
+        .overlay-alert {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 0, 0, 0.8);
+            color: white;
+            padding: 10px 30px;
+            font-size: 24px;
+            font-weight: bold;
+            border-radius: 4px;
+            display: none;
+            border: 2px solid white;
+            animation: flash 0.5s infinite;
+        }
+
+        /* SIDEBAR */
+        aside {
+            background: var(--panel-bg);
+            border-left: 1px solid #333;
+            display: flex;
+            flex-direction: column;
+            padding: 10px;
+            overflow-y: auto;
+        }
+        
+        h3 { border-bottom: 1px solid #555; padding-bottom: 5px; margin-top: 0; color: var(--accent-cyan); font-size: 16px; }
+
+        .controls { margin-bottom: 20px; }
+        select, button {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 8px;
+            background: #0b0c10;
+            color: white;
+            border: 1px solid var(--accent-green);
+            cursor: pointer;
+        }
+        button:hover { background: var(--accent-green); color: black; }
+
+        /* LOG FEED */
+        .log-container {
+            flex-grow: 1;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #333;
+            background: #000;
+            padding: 5px;
+            margin-bottom: 10px;
+            height: 200px;
+        }
+        .log-entry { margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px; }
+        .log-time { color: #888; margin-right: 5px; }
+        .log-warn { color: var(--warning-orange); }
+        .log-danger { color: var(--alert-red); font-weight: bold; }
+
+        /* FACE CAPTURES */
+        .face-gallery {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .captured-face {
+            border: 1px solid var(--accent-cyan);
+            border-radius: 2px;
+            overflow: hidden;
+            position: relative;
+        }
+        .captured-face img { width: 100%; display: block; }
+        .captured-face .meta {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0,0,0,0.7);
+            font-size: 10px;
+            color: white;
+            padding: 2px;
+        }
+
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+        @keyframes flash { 0% { border-color: red; } 50% { border-color: yellow; } 100% { border-color: red; } }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo">SENTINEL <span style="font-size: 12px; opacity: 0.7;">AI SECURITY v1.0</span></div>
+        <div class="system-status">
+            <div class="status-item"><div class="recording-dot" id="rec-dot"></div><span id="sys-state">OFFLINE</span></div>
+            <div class="status-item">FPS: <span id="fps-counter">0</span></div>
+            <div class="status-item">OBJ: <span id="obj-count">0</span></div>
+        </div>
+    </header>
+
+    <main>
+        <div class="video-panel">
+            <video id="input_video"></video>
+            <canvas id="output_canvas" width="1280" height="720"></canvas>
+            <div id="alert-banner" class="overlay-alert">⚠️ SECURITY THREAT DETECTED</div>
+        </div>
+
+        <aside>
+            <div class="controls">
+                <h3>CONFIGURATION</h3>
+                <label style="font-size: 12px;">CAMERA SOURCE</label>
+                <select id="camera-select"><option>Loading cameras...</option></select>
+                <button onclick="toggleSystem()" id="toggle-btn">START SYSTEM</button>
+                <button onclick="downloadLogs()">DOWNLOAD INCIDENT LOGS</button>
+            </div>
+
+            <h3>LIVE INCIDENT LOG</h3>
+            <div class="log-container" id="log-feed">
+                </div>
+
+            <h3>SUSPECT CAPTURES</h3>
+            <div class="face-gallery" id="face-gallery">
+                </div>
+        </aside>
+    </main>
+
+<script>
+    // --- SYSTEM STATE & CONFIG ---
+    const config = {
+        scoreThreshold: 0.5,
+        minLogInterval: 2000, // Time between identical logs
+        faceCaptureCooldown: 3000 // Time between face captures
+    };
+
+    const state = {
+        isRunning: false,
+        lastLogTime: 0,
+        lastFaceCapture: 0,
+        detectedObjects: [],
+        alertActive: false,
+        fps: 0,
+        frameCount: 0
+    };
+
+    // DOM Elements
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const logFeed = document.getElementById('log-feed');
+    const gallery = document.getElementById('face-gallery');
+    const alertBanner = document.getElementById('alert-banner');
+    const recDot = document.getElementById('rec-dot');
+    const fpsDisplay = document.getElementById('fps-counter');
+    
+    // AI Models
+    let objectModel = null;
+    let holistic = null;
+    let camera = null;
+
+    // Data Store for Logs
+    let eventLogs = [];
+
+    // --- INITIALIZATION ---
+    async function init() {
+        log("Initializing AI Neural Networks...", "normal");
+        
+        // 1. Load Object Detection (COCO-SSD)
+        try {
+            objectModel = await cocoSsd.load();
+            log("Object Detection Module Loaded.", "normal");
+        } catch(e) { log("Error loading COCO-SSD: " + e, "danger"); }
+
+        // 2. Setup MediaPipe Holistic
+        holistic = new Holistic({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`});
+        holistic.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        holistic.onResults(onResults);
+        
+        log("Pose & Biometrics Module Loaded.", "normal");
+        log("System Ready. Select Camera and Start.", "normal");
+
+        // 3. Populate Camera List
+        await getCameras();
+    }
+
+    async function getCameras() {
+        const select = document.getElementById('camera-select');
+        select.innerHTML = "";
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videos = devices.filter(d => d.kind === 'videoinput');
+            videos.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.deviceId;
+                opt.text = d.label || `Camera ${select.length + 1}`;
+                select.appendChild(opt);
+            });
+        } catch(err) {
+            log("Camera permission denied or unavailable.", "danger");
+        }
+    }
+
+    function toggleSystem() {
+        state.isRunning = !state.isRunning;
+        const btn = document.getElementById('toggle-btn');
+        const status = document.getElementById('sys-state');
+        
+        if (state.isRunning) {
+            btn.innerText = "STOP SYSTEM";
+            btn.style.background = "#ff3b3b";
+            status.innerText = "ONLINE";
+            status.style.color = "#00ff00";
+            recDot.classList.add('active');
+            startCamera();
+        } else {
+            btn.innerText = "START SYSTEM";
+            btn.style.background = "#003300";
+            status.innerText = "OFFLINE";
+            status.style.color = "white";
+            recDot.classList.remove('active');
+            if (camera) camera.stop();
+        }
+    }
+
+    function startCamera() {
+        const deviceId = document.getElementById('camera-select').value;
+        camera = new Camera(videoElement, {
+            onFrame: async () => {
+                if (!state.isRunning) return;
+                state.frameCount++;
+                await holistic.send({image: videoElement});
+                
+                // Run Object Detection every 5th frame to save performance
+                if (state.frameCount % 5 === 0 && objectModel) {
+                    objectModel.detect(videoElement).then(preds => {
+                        state.detectedObjects = preds;
+                        document.getElementById('obj-count').innerText = preds.length;
+                    });
+                }
+            },
+            width: 1280,
+            height: 720,
+            deviceId: deviceId
+        });
+        camera.start();
+    }
+
+    // --- CORE LOGIC LOOP ---
+    function onResults(results) {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        
+        // Draw Video Feed
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        // 1. Draw Object Detections
+        state.detectedObjects.forEach(obj => {
+            const [x, y, w, h] = obj.bbox;
+            const isPerson = obj.class === 'person';
+            
+            // Draw Box
+            canvasCtx.strokeStyle = isPerson ? '#00ff00' : '#00ffff';
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeRect(x, y, w, h);
+            
+            // Label
+            canvasCtx.fillStyle = isPerson ? '#00ff00' : '#00ffff';
+            canvasCtx.fillText(`${obj.class.toUpperCase()} ${Math.round(obj.score*100)}%`, x, y > 10 ? y - 5 : 10);
+
+            // Log dangerous objects
+            if(['knife', 'scissors', 'gun'].includes(obj.class)) {
+                triggerAlert(`WEAPON DETECTED: ${obj.class.toUpperCase()}`);
+            }
+        });
+
+        // 2. Process Pose & Action
+        let action = "Scanning...";
+        if (results.poseLandmarks) {
+            drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: 'rgba(0,255,0,0.5)', lineWidth: 2});
+            
+            // Logic Analysis
+            const landmarks = results.poseLandmarks;
+            const nose = landmarks[0];
+            const leftAnkle = landmarks[27];
+            const rightAnkle = landmarks[28];
+            const leftWrist = landmarks[15];
+            const rightWrist = landmarks[16];
+
+            // A. FALL DETECTION (Head is lower or level with hips vertically + body is horizontal)
+            // Simplifying: Check if head Y is unusually low compared to width of bounding box
+            const hipY = (landmarks[23].y + landmarks[24].y) / 2;
+            if (nose.y > hipY) { // Head below hips?
+                 // Simple inversion check
+                 action = "FALL DETECTED";
+                 triggerAlert("HUMAN FALL DETECTED");
+            }
+
+            // B. FIGHTING (Hands above shoulders + close to face + rapid movement would be next step)
+            // Static check: Hands up in guard position
+            const shoulderY = (landmarks[11].y + landmarks[12].y) / 2;
+            if (leftWrist.y < shoulderY && rightWrist.y < shoulderY) {
+                if (Math.abs(leftWrist.x - rightWrist.x) < 0.3) {
+                    action = "COMBAT STANCE / AGGRESSION";
+                    triggerAlert("AGGRESSIVE STANCE DETECTED");
+                } else {
+                    action = "HANDS RAISED (SURRENDER?)";
+                }
+            }
+        }
+
+        // 3. Face Capture & Verification
+        if (results.faceLandmarks) {
+            drawConnectors(canvasCtx, results.faceLandmarks, FACEMESH_TESSELATION, {color: '#C0C0C020', lineWidth: 0.5});
+            
+            // Calculate Bounding Box for Face
+            let xMin=1, xMax=0, yMin=1, yMax=0;
+            results.faceLandmarks.forEach(lm => {
+                if(lm.x < xMin) xMin = lm.x;
+                if(lm.x > xMax) xMax = lm.x;
+                if(lm.y < yMin) yMin = lm.y;
+                if(lm.y > yMax) yMax = lm.y;
+            });
+
+            // Capture Face logic
+            const now = Date.now();
+            if (now - state.lastFaceCapture > config.faceCaptureCooldown) {
+                // If face is reasonably large (close enough)
+                if ((xMax - xMin) > 0.1) {
+                    captureFace(results.image, xMin, yMin, xMax - xMin, yMax - yMin);
+                    state.lastFaceCapture = now;
+                }
+            }
+        }
+
+        // 4. Update UI Overlay
+        canvasCtx.fillStyle = state.alertActive ? "red" : "#00ff00";
+        canvasCtx.font = "bold 24px Courier New";
+        canvasCtx.fillText(`STATUS: ${action}`, 50, 50);
+
+        canvasCtx.restore();
+        updateFPS();
+    }
+
+    // --- HELPER FUNCTIONS ---
+
+    function triggerAlert(msg) {
+        state.alertActive = true;
+        alertBanner.style.display = 'block';
+        alertBanner.innerText = "⚠️ " + msg;
+        log(msg, "danger");
+        
+        // Hide alert after 2 seconds
+        setTimeout(() => {
+            state.alertActive = false;
+            alertBanner.style.display = 'none';
+        }, 2000);
+    }
+
+    function captureFace(imageBitmap, x, y, w, h) {
+        // Create a temporary canvas to crop the face
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = 100;
+        tempCanvas.height = 100;
+        const ctx = tempCanvas.getContext('2d');
+        
+        // Convert normalized coords to pixels
+        const imgW = imageBitmap.width;
+        const imgH = imageBitmap.height;
+        
+        ctx.drawImage(imageBitmap, x*imgW, y*imgH, w*imgW, h*imgH, 0, 0, 100, 100);
+        
+        const dataUrl = tempCanvas.toDataURL('image/jpeg');
+        
+        // Add to Sidebar
+        const div = document.createElement('div');
+        div.className = 'captured-face';
+        div.innerHTML = `
+            <img src="${dataUrl}">
+            <div class="meta">${new Date().toLocaleTimeString()}</div>
+        `;
+        gallery.prepend(div);
+        
+        log("Suspect Face Archived", "warn");
+    }
+
+    function log(msg, type) {
+        const now = Date.now();
+        // Prevent spamming the same log
+        if (msg === state.lastLogMsg && (now - state.lastLogTime < 2000)) return;
+
+        state.lastLogMsg = msg;
+        state.lastLogTime = now;
+
+        const time = new Date().toLocaleTimeString();
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        
+        let colorClass = "";
+        if (type === "danger") colorClass = "log-danger";
+        else if (type === "warn") colorClass = "log-warn";
+
+        entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="${colorClass}">${msg}</span>`;
+        logFeed.prepend(entry);
+        
+        // Store for download
+        eventLogs.push({timestamp: new Date().toISOString(), type: type, message: msg});
+    }
+
+    function downloadLogs() {
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(eventLogs, null, 2));
+        const link = document.createElement('a');
+        link.setAttribute("href", dataStr);
+        link.setAttribute("download", "security_logs.json");
+        link.click();
+    }
+
+    let lastLoop = new Date();
+    function updateFPS() { 
+        const thisLoop = new Date();
+        const fps = 1000 / (thisLoop - lastLoop);
+        lastLoop = thisLoop;
+        fpsDisplay.innerText = Math.round(fps);
+    }
+
+    // Initialize System
+    init();
+
+</script>
+</body>
+</html>
